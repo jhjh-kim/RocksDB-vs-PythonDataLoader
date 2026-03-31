@@ -282,37 +282,43 @@ def run_experiment(args):
     print(f"  num_workers : {args.num_workers}")
     print(f"  epochs      : {args.epochs}")
     print(f"  warmup      : {args.warmup}")
-    print(f"  avg         : {not args.no_avg}")
+    print(f"  avg              : {not args.no_avg}")
+    print(f"  skip_exhaustive  : {args.skip_exhaustive}")
     print("=" * 70)
     print()
 
     avg = not args.no_avg
+    n_variants = 2 if args.skip_exhaustive else 3
+    step = 0
 
     # ── Construct datasets ──────────────────────────────────────────────
-    print("[1/3] Loading EEGDatasetBench (pre-loaded into memory) ...")
+    step += 1
+    print(f"[{step}/{n_variants}] Loading EEGDatasetBench (pre-loaded into memory) ...")
     t0 = time.perf_counter()
     ds_eeg = EEGDatasetBench(args.data_dir, args.subjects, args.mode, avg=avg)
     t_load_eeg = time.perf_counter() - t0
     print(f"       → {len(ds_eeg)} samples loaded in {t_load_eeg:.2f}s\n")
 
-    print("[2/3] Initializing ExhaustiveSearchDataset ...")
-    t0 = time.perf_counter()
-    ds_exh = ExhaustiveSearchDataset(args.data_dir, args.subjects, args.mode, avg=avg)
-    t_load_exh = time.perf_counter() - t0
-    print(f"       → {len(ds_exh)} samples indexed in {t_load_exh:.2f}s\n")
+    variants = [("EEGDataset", ds_eeg)]
 
-    print("[3/3] Opening RocksDBDataset ...")
+    if not args.skip_exhaustive:
+        step += 1
+        print(f"[{step}/{n_variants}] Initializing ExhaustiveSearchDataset ...")
+        t0 = time.perf_counter()
+        ds_exh = ExhaustiveSearchDataset(args.data_dir, args.subjects, args.mode, avg=avg)
+        t_load_exh = time.perf_counter() - t0
+        print(f"       → {len(ds_exh)} samples indexed in {t_load_exh:.2f}s\n")
+        variants.append(("Exhaustive", ds_exh))
+
+    step += 1
+    print(f"[{step}/{n_variants}] Opening RocksDBDataset ...")
     t0 = time.perf_counter()
     ds_rdb = RocksDBDataset(args.db_path, args.subjects)
     t_load_rdb = time.perf_counter() - t0
     print(f"       → {len(ds_rdb)} keys indexed in {t_load_rdb:.2f}s\n")
+    variants.append(("RocksDB", ds_rdb))
 
     # ── Run benchmarks ──────────────────────────────────────────────────
-    variants = [
-        ("EEGDataset", ds_eeg),
-        ("Exhaustive", ds_exh),
-        ("RocksDB",    ds_rdb),
-    ]
 
     all_results = []
 
@@ -382,6 +388,8 @@ def main():
                         help="Run 1 warm-up epoch before measuring (default: off)")
     parser.add_argument("--no_avg", action="store_true",
                         help="Do NOT average over trials")
+    parser.add_argument("--skip_exhaustive", action="store_true", default=False,
+                        help="Skip the Exhaustive (worst-case) dataset variant")
     parser.add_argument("--output", type=str, default=None,
                         help="Path to save JSON results (optional)")
 
