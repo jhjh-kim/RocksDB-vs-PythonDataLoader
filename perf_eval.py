@@ -233,13 +233,13 @@ def benchmark_dataloader(dataset: Dataset, batch_size: int, num_workers: int,
         batch_latencies = []
         t_epoch_start = time.perf_counter()
 
+        t_batch_start = time.perf_counter()
         for batch in loader:
-            t_batch_start = time.perf_counter()
-            # Simulate minimal processing: move to CPU (already there) + access data
-            _ = batch["eeg"].shape
-            _ = batch["label"].shape
             t_batch_end = time.perf_counter()
             batch_latencies.append(t_batch_end - t_batch_start)
+            _ = batch["eeg"].shape
+            _ = batch["label"].shape
+            t_batch_start = time.perf_counter()
 
         t_epoch_end = time.perf_counter()
         epoch_time = t_epoch_end - t_epoch_start
