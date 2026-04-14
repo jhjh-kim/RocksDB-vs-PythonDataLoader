@@ -98,6 +98,51 @@ def import_python_rocksdb():
 rocksdb = import_python_rocksdb()
 
 
+def resolve_db_path(data_dir: str, mode: str, db_path: str | None, db_path_was_explicit: bool) -> str:
+    """
+    Resolve the RocksDB path with a few practical fallbacks.
+
+    Priority:
+      1) explicit --db_path
+      2) <data_dir>/rocksdb_<mode>
+      3) ./rocksdb_<mode>
+      4) ./rocksdb
+    """
+    candidates = []
+    if db_path:
+        candidates.append(db_path)
+    else:
+        candidates.extend([
+            os.path.join(data_dir, f"rocksdb_{mode}"),
+            os.path.join(os.getcwd(), f"rocksdb_{mode}"),
+            os.path.join(os.getcwd(), "rocksdb"),
+        ])
+
+    seen = set()
+    ordered_candidates = []
+    for candidate in candidates:
+        normalized = os.path.abspath(candidate)
+        if normalized not in seen:
+            seen.add(normalized)
+            ordered_candidates.append(normalized)
+
+    for candidate in ordered_candidates:
+        if os.path.exists(os.path.join(candidate, "CURRENT")):
+            return candidate
+
+    if db_path_was_explicit:
+        raise FileNotFoundError(
+            "Could not find a RocksDB database at the requested path. "
+            f"Checked: {ordered_candidates[0]}"
+        )
+
+    raise FileNotFoundError(
+        "Could not find a RocksDB database. Checked the following candidates: "
+        + ", ".join(ordered_candidates)
+        + ". If your DB lives elsewhere, pass --db_path explicitly."
+    )
+
+
 def safe_mean(values) -> float:
     arr = np.asarray(values, dtype=float)
     return float(np.mean(arr)) if arr.size else float("nan")
@@ -867,8 +912,8 @@ def main():
     )
 
     args = parser.parse_args()
-    if args.db_path is None:
-        args.db_path = os.path.join(args.data_dir, f"rocksdb_{args.mode}")
+    db_path_was_explicit = args.db_path is not None
+    args.db_path = resolve_db_path(args.data_dir, args.mode, args.db_path, db_path_was_explicit)
 
     run_experiment(args)
 
