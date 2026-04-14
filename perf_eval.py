@@ -487,6 +487,7 @@ class RocksDBDataset(Dataset):
         self.max_open_files = max_open_files
         self.collect_internal_metrics = collect_internal_metrics
         self.metrics_sample_stride = max(1, metrics_sample_stride)
+        self.legacy_fast_path = (not self.collect_internal_metrics) and self.block_cache_size_mb <= 0
 
         self._db = None
         self._db_pid = None
@@ -497,6 +498,10 @@ class RocksDBDataset(Dataset):
         self.keys = self._build_keys()
         if not self.keys:
             raise RuntimeError(f"No data found in RocksDB at {db_path} for subjects {subjects}")
+
+        if self.legacy_fast_path:
+            # Match the original benchmark behavior as closely as possible.
+            self.db = self._open_db()
 
     def _make_db_options(self):
         opts = rocksdb.Options()
@@ -593,6 +598,15 @@ class RocksDBDataset(Dataset):
         return len(self.keys)
 
     def __getitem__(self, index):
+        if self.legacy_fast_path:
+            raw = self.db.get(self.keys[index])
+            buf = io.BytesIO(raw)
+            sample = torch.load(buf, weights_only=False)
+            return {
+                "eeg": sample["eeg"],
+                "label": torch.tensor(sample["label"], dtype=torch.long),
+            }
+
         db = self._ensure_db()
         raw = db.get(self.keys[index])
         self._access_count += 1
@@ -600,18 +614,18 @@ class RocksDBDataset(Dataset):
         buf = io.BytesIO(raw)
         sample = torch.load(buf, weights_only=False)
 
-        trace_metrics = empty_trace_metrics()
+        result = {
+            "eeg": sample["eeg"],
+            "label": torch.tensor(sample["label"], dtype=torch.long),
+        }
+
         if self.collect_internal_metrics:
             should_sample = self._access_count == 1 or (self._access_count % self.metrics_sample_stride) == 0
             if should_sample:
                 self._cached_trace_metrics = self._snapshot_trace_metrics()
-            trace_metrics = dict(self._cached_trace_metrics)
+            result["trace_metrics"] = dict(self._cached_trace_metrics)
 
-        return {
-            "eeg": sample["eeg"],
-            "label": torch.tensor(sample["label"], dtype=torch.long),
-            "trace_metrics": trace_metrics,
-        }
+        return result
 
 
 def benchmark_dataloader(dataset: Dataset, batch_size: int, num_workers: int,
