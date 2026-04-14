@@ -8,14 +8,12 @@ Compares three EEG data loading strategies:
 
 Usage:
     python perf_eval.py \
-        --data_dir /path/to/data \
         --subjects sub-01 \
         --mode train \
-        --db_path /path/to/rocksdb_train \
-        --batch_sizes 1 32 128 \
-        --num_workers 0 4 \
+        --batch_sizes 32 64 128 256 \
+        --num_workers 0 4 8 16 \
         --epochs 3 \
-        --warmup
+        --skip_exhaustive
 """
 
 import argparse
@@ -370,13 +368,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument("--data_dir", type=str, required=True,
+    parser.add_argument("--data_dir", type=str, default="/gpfs/data/oermannlab/users/jk8865/ATS/data/things-eeg/Preprocessed_data_250Hz_whiten",
                         help="Root data directory with subject folders")
     parser.add_argument("--subjects", nargs="+", required=True,
                         help="Subject IDs (e.g. sub-01 sub-02)")
     parser.add_argument("--mode", type=str, default="train", choices=["train", "test"],
                         help="Data split (default: train)")
-    parser.add_argument("--db_path", type=str, default=None,
+    parser.add_argument("--db_path", type=str, default="rocksdb",
                         help="RocksDB database path (default: <data_dir>/rocksdb_<mode>)")
     parser.add_argument("--batch_sizes", nargs="+", type=int, default=[1, 32, 128],
                         help="Batch sizes to test (default: 1 32 128)")
