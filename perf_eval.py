@@ -357,12 +357,14 @@ class EEGDatasetBench(Dataset):
     CHANNELS = CHANNELS
 
     def __init__(self, data_dir: str, subjects: list[str], mode: str,
-                 selected_ch: list[str] | None = None, avg: bool = True):
+                 selected_ch: list[str] | None = None, avg: bool = True,
+                 share_across_workers: bool = True):
         self.data_dir = data_dir
         self.subjects = subjects
         self.mode = mode
         self.selected_ch = selected_ch or self.CHANNELS
         self.avg = avg
+        self.share_across_workers = share_across_workers
 
         self.all_eeg = []
         self.all_labels = []
@@ -388,6 +390,14 @@ class EEGDatasetBench(Dataset):
 
         self.all_eeg = torch.cat(self.all_eeg, dim=0)
         self.all_labels = torch.cat(self.all_labels, dim=0)
+
+        # Optional: share backing storage across DataLoader worker processes
+        # so the preloaded baseline does not replicate the full tensor per worker.
+        if self.share_across_workers:
+            if hasattr(self.all_eeg, "share_memory_"):
+                self.all_eeg.share_memory_()
+            if hasattr(self.all_labels, "share_memory_"):
+                self.all_labels.share_memory_()
 
     def __len__(self):
         return len(self.all_eeg)
