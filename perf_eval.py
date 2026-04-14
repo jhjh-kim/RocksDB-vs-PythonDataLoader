@@ -358,7 +358,7 @@ class EEGDatasetBench(Dataset):
 
     def __init__(self, data_dir: str, subjects: list[str], mode: str,
                  selected_ch: list[str] | None = None, avg: bool = True,
-                 share_across_workers: bool = True):
+                 share_across_workers: bool = False):
         self.data_dir = data_dir
         self.subjects = subjects
         self.mode = mode
@@ -476,9 +476,9 @@ class RocksDBDataset(Dataset):
         self,
         db_path: str,
         subjects: list[str],
-        block_cache_size_mb: int = 512,
+        block_cache_size_mb: int = 0,
         max_open_files: int = -1,
-        collect_internal_metrics: bool = True,
+        collect_internal_metrics: bool = False,
         metrics_sample_stride: int = 1,
     ):
         self.db_path = db_path
@@ -503,7 +503,12 @@ class RocksDBDataset(Dataset):
         opts.create_if_missing = False
         opts.max_open_files = self.max_open_files
 
-        if hasattr(rocksdb, "BlockBasedTableFactory") and hasattr(rocksdb, "LRUCache"):
+        if (
+            self.block_cache_size_mb
+            and self.block_cache_size_mb > 0
+            and hasattr(rocksdb, "BlockBasedTableFactory")
+            and hasattr(rocksdb, "LRUCache")
+        ):
             self._block_cache = rocksdb.LRUCache(self.block_cache_size_mb * 1024 * 1024)
             opts.table_factory = rocksdb.BlockBasedTableFactory(block_cache=self._block_cache)
 
@@ -745,7 +750,9 @@ def run_experiment(args):
     print(f"  warmup                : {args.warmup}")
     print(f"  avg                   : {not args.no_avg}")
     print(f"  skip_exhaustive       : {args.skip_exhaustive}")
+    print(f"  share_preloaded_dataset: {args.share_preloaded_dataset}")
     print(f"  rocksdb_block_cache_mb: {args.rocksdb_block_cache_mb}")
+    print(f"  enable_rocksdb_metrics: {args.enable_rocksdb_metrics and not args.disable_rocksdb_metrics}")
     print(f"  metrics_sample_stride : {args.metrics_sample_stride}")
     print("=" * 70)
     print()
@@ -757,7 +764,13 @@ def run_experiment(args):
     step += 1
     print(f"[{step}/{n_variants}] Loading EEGDatasetBench (pre-loaded into memory) ...")
     t0 = time.perf_counter()
-    ds_eeg = EEGDatasetBench(args.data_dir, args.subjects, args.mode, avg=avg)
+    ds_eeg = EEGDatasetBench(
+        args.data_dir,
+        args.subjects,
+        args.mode,
+        avg=avg,
+        share_across_workers=args.share_preloaded_dataset,
+    )
     print(f"       -> {len(ds_eeg)} samples loaded in {time.perf_counter() - t0:.2f}s\n")
 
     variants = [("EEGDataset", ds_eeg)]
@@ -778,7 +791,7 @@ def run_experiment(args):
         args.subjects,
         block_cache_size_mb=args.rocksdb_block_cache_mb,
         max_open_files=args.rocksdb_max_open_files,
-        collect_internal_metrics=not args.disable_rocksdb_metrics,
+        collect_internal_metrics=args.enable_rocksdb_metrics and not args.disable_rocksdb_metrics,
         metrics_sample_stride=args.metrics_sample_stride,
     )
     print(f"       -> {len(ds_rdb)} keys indexed in {time.perf_counter() - t0:.2f}s\n")
@@ -860,7 +873,8 @@ def run_experiment(args):
             "rocksdb_block_cache_mb": args.rocksdb_block_cache_mb,
             "rocksdb_max_open_files": args.rocksdb_max_open_files,
             "metrics_sample_stride": args.metrics_sample_stride,
-            "collect_rocksdb_metrics": not args.disable_rocksdb_metrics,
+            "collect_rocksdb_metrics": args.enable_rocksdb_metrics and not args.disable_rocksdb_metrics,
+            "share_preloaded_dataset": args.share_preloaded_dataset,
         },
         "summary": all_results,
         "traces": all_traces,
@@ -897,10 +911,16 @@ def main():
     parser.add_argument("--skip_exhaustive", action="store_true", default=False, help="Skip the exhaustive variant")
     parser.add_argument("--output", type=str, default=None, help="Path to save the JSON report")
     parser.add_argument(
+        "--share_preloaded_dataset",
+        action="store_true",
+        default=False,
+        help="Share the preloaded EEGDataset tensors across workers to reduce memory use",
+    )
+    parser.add_argument(
         "--rocksdb_block_cache_mb",
         type=int,
-        default=512,
-        help="Per-process RocksDB block-cache capacity in MiB for the benchmark",
+        default=0,
+        help="Per-process RocksDB block-cache capacity in MiB; 0 keeps legacy behavior",
     )
     parser.add_argument(
         "--rocksdb_max_open_files",
@@ -915,10 +935,16 @@ def main():
         help="Snapshot RocksDB properties every N sample fetches",
     )
     parser.add_argument(
+        "--enable_rocksdb_metrics",
+        action="store_true",
+        default=False,
+        help="Enable collection of RocksDB block-cache / compaction properties",
+    )
+    parser.add_argument(
         "--disable_rocksdb_metrics",
         action="store_true",
         default=False,
-        help="Disable collection of RocksDB block-cache / compaction properties",
+        help="Compatibility flag: forces RocksDB internal metric collection off",
     )
 
     args = parser.parse_args()
