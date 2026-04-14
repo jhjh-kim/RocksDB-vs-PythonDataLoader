@@ -28,6 +28,7 @@ Recommended usage:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import subprocess
@@ -128,12 +129,12 @@ def cpu_affinity_scope(cpu_budget: int):
         os.sched_setaffinity(0, set(original))
 
 
-def raw_report_path(output_dir: str, cpu_budget: int, repeat_idx: int) -> str:
-    return os.path.join(output_dir, "raw", f"cpu{cpu_budget}_rep{repeat_idx}.json")
+def raw_report_path(output_dir: str, cpu_budget: int, num_workers: int, repeat_idx: int) -> str:
+    return os.path.join(output_dir, "raw", f"cpu{cpu_budget}_nw{num_workers}_rep{repeat_idx}.json")
 
 
-def raw_log_path(output_dir: str, cpu_budget: int, repeat_idx: int) -> str:
-    return os.path.join(output_dir, "logs", f"cpu{cpu_budget}_rep{repeat_idx}.log")
+def raw_log_path(output_dir: str, cpu_budget: int, num_workers: int, repeat_idx: int) -> str:
+    return os.path.join(output_dir, "logs", f"cpu{cpu_budget}_nw{num_workers}_rep{repeat_idx}.log")
 
 
 def load_json(path: str) -> dict:
@@ -141,11 +142,31 @@ def load_json(path: str) -> dict:
         return json.load(handle)
 
 
-def run_single_benchmark(args, cpu_budget: int, repeat_idx: int) -> dict:
+def selected_trace_cpu_budget(args) -> int:
+    return args.trace_cpu_budget if args.trace_cpu_budget is not None else min(args.cpu_budgets)
+
+
+def selected_trace_num_workers(args) -> int:
+    return args.trace_num_workers if args.trace_num_workers is not None else max(args.num_workers)
+
+
+def effective_rocksdb_block_cache_mb(args, num_workers: int) -> int:
+    """
+    Treat the configured cache budget as a total budget for one benchmark
+    subprocess and split it across the DB-owning processes.
+    """
+    total_budget_mb = max(1, int(args.rocksdb_block_cache_mb))
+    process_count = max(1, int(num_workers) + 1)
+    per_process = max(int(args.rocksdb_cache_floor_mb), total_budget_mb // process_count)
+    return max(1, per_process)
+
+
+def run_single_benchmark(args, cpu_budget: int, num_workers: int, repeat_idx: int) -> dict:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     perf_eval_path = os.path.join(script_dir, "perf_eval.py")
-    report_path = raw_report_path(args.output_dir, cpu_budget, repeat_idx)
-    log_path = raw_log_path(args.output_dir, cpu_budget, repeat_idx)
+    report_path = raw_report_path(args.output_dir, cpu_budget, num_workers, repeat_idx)
+    log_path = raw_log_path(args.output_dir, cpu_budget, num_workers, repeat_idx)
+    block_cache_mb = effective_rocksdb_block_cache_mb(args, num_workers)
 
     cmd = [
         sys.executable,
@@ -155,10 +176,10 @@ def run_single_benchmark(args, cpu_budget: int, repeat_idx: int) -> dict:
         "--mode", args.mode,
         "--db_path", args.db_path,
         "--batch_sizes", str(args.batch_size),
-        "--num_workers", *[str(num_worker) for num_worker in args.num_workers],
+        "--num_workers", str(num_workers),
         "--epochs", str(args.epochs),
         "--output", report_path,
-        "--rocksdb_block_cache_mb", str(args.rocksdb_block_cache_mb),
+        "--rocksdb_block_cache_mb", str(block_cache_mb),
         "--metrics_sample_stride", str(args.metrics_sample_stride),
         "--skip_exhaustive",
     ]
@@ -174,17 +195,27 @@ def run_single_benchmark(args, cpu_budget: int, repeat_idx: int) -> dict:
         log_handle.write("COMMAND:\n")
         log_handle.write(" ".join(cmd) + "\n\n")
         log_handle.write(f"PINNED_CPUS: {pinned_cpus}\n\n")
+        log_handle.write(f"EFFECTIVE_ROCKSDB_BLOCK_CACHE_MB_PER_PROCESS: {block_cache_mb}\n\n")
         log_handle.flush()
         subprocess.run(cmd, cwd=script_dir, stdout=log_handle, stderr=subprocess.STDOUT, check=True)
 
     payload = load_json(report_path)
     payload.setdefault("metadata", {})
     payload["metadata"]["cpu_budget_requested"] = int(cpu_budget)
+    payload["metadata"]["num_workers_requested"] = int(num_workers)
     payload["metadata"]["repeat"] = int(repeat_idx)
     payload["metadata"]["batch_size_fixed"] = int(args.batch_size)
-    payload["metadata"]["num_workers_sweep"] = list(args.num_workers)
+    payload["metadata"]["num_workers_sweep"] = [int(num_workers)]
     payload["metadata"]["raw_report_path"] = report_path
     payload["metadata"]["raw_log_path"] = log_path
+    payload["metadata"]["effective_rocksdb_block_cache_mb_per_process"] = int(block_cache_mb)
+
+    if not (
+        int(cpu_budget) == selected_trace_cpu_budget(args)
+        and int(num_workers) == selected_trace_num_workers(args)
+    ):
+        payload["traces"] = []
+
     return payload
 
 
@@ -438,8 +469,24 @@ def main():
     parser.add_argument("--epochs", type=int, default=3, help="Measured epochs per run")
     parser.add_argument("--repeats", type=int, default=3, help="Repeated runs per CPU budget")
     parser.add_argument("--output_dir", type=str, default="paper_runs", help="Directory for raw reports and figures")
-    parser.add_argument("--rocksdb_block_cache_mb", type=int, default=512, help="Per-process RocksDB block cache size")
-    parser.add_argument("--metrics_sample_stride", type=int, default=1, help="RocksDB property sampling stride")
+    parser.add_argument(
+        "--rocksdb_block_cache_mb",
+        type=int,
+        default=512,
+        help="Total RocksDB cache budget per benchmark subprocess; automatically split across processes",
+    )
+    parser.add_argument(
+        "--rocksdb_cache_floor_mb",
+        type=int,
+        default=32,
+        help="Minimum per-process RocksDB cache size after budget splitting",
+    )
+    parser.add_argument(
+        "--metrics_sample_stride",
+        type=int,
+        default=64,
+        help="RocksDB property sampling stride; larger values reduce overhead and JSON size",
+    )
     parser.add_argument("--trace_cpu_budget", type=int, default=None, help="CPU budget used for the representative trace plot")
     parser.add_argument("--trace_num_workers", type=int, default=None, help="Worker count used for the representative trace plot")
     parser.add_argument("--no_avg", action="store_true", help="Pass through to perf_eval.py")
@@ -460,13 +507,23 @@ def main():
     print(f"epochs       : {args.epochs}")
     print(f"repeats      : {args.repeats}")
     print(f"db_path      : {args.db_path}")
+    print(f"rocksdb_total_cache_budget_mb : {args.rocksdb_block_cache_mb}")
+    print(f"rocksdb_cache_floor_mb        : {args.rocksdb_cache_floor_mb}")
+    print(f"trace_cpu_budget             : {selected_trace_cpu_budget(args)}")
+    print(f"trace_num_workers            : {selected_trace_num_workers(args)}")
     print()
 
     run_payloads = []
     for cpu_budget in args.cpu_budgets:
-        for repeat_idx in range(1, args.repeats + 1):
-            print(f"[run] cpu_budget={cpu_budget}, repeat={repeat_idx}")
-            run_payloads.append(run_single_benchmark(args, cpu_budget, repeat_idx))
+        for num_workers in args.num_workers:
+            for repeat_idx in range(1, args.repeats + 1):
+                effective_cache = effective_rocksdb_block_cache_mb(args, num_workers)
+                print(
+                    f"[run] cpu_budget={cpu_budget}, num_workers={num_workers}, "
+                    f"repeat={repeat_idx}, rocksdb_cache_per_process_mb={effective_cache}"
+                )
+                run_payloads.append(run_single_benchmark(args, cpu_budget, num_workers, repeat_idx))
+                gc.collect()
 
     aggregated, trace_runs = aggregate_payloads(run_payloads)
 

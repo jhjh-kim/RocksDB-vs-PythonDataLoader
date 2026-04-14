@@ -9,4 +9,5 @@ bash run_srun_experiments.sh \
   --epochs 3 \
   --repeats 3 \
   --output_root paper_runs_srun \
+  --rocksdb_block_cache_mb 256 \
   --python /gpfs/data/oermannlab/users/jk8865/.conda/thought2txt/bin/python
