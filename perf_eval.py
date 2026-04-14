@@ -629,7 +629,8 @@ class RocksDBDataset(Dataset):
 
 
 def benchmark_dataloader(dataset: Dataset, batch_size: int, num_workers: int,
-                         num_epochs: int, label: str) -> tuple[dict, list[dict]]:
+                         num_epochs: int, label: str,
+                         record_traces: bool = False) -> tuple[dict, list[dict]]:
     """
     Run a DataLoader for `num_epochs` epochs and collect summary stats
     plus per-step traces for paper-quality figures.
@@ -666,33 +667,34 @@ def benchmark_dataloader(dataset: Dataset, batch_size: int, num_workers: int,
             batch_samples = int(batch["label"].shape[0])
             throughput = batch_samples / batch_latency if batch_latency > 0.0 else float("nan")
 
-            trace_record = {
-                "label": label,
-                "batch_size": int(batch_size),
-                "num_workers": int(num_workers),
-                "epoch": int(epoch + 1),
-                "step_in_epoch": int(step_in_epoch),
-                "global_step": int(global_step),
-                "samples_in_batch": int(batch_samples),
-                "batch_latency_sec": float(batch_latency),
-                "throughput_samples_per_sec": float(throughput),
-                "epoch_elapsed_sec": float(t_batch_end - epoch_start),
-                "run_elapsed_sec": float(t_batch_end - run_start),
-                "rocksdb_block_cache_hit_rate": float("nan"),
-                "rocksdb_delta_block_cache_hit": float("nan"),
-                "rocksdb_delta_block_cache_miss": float("nan"),
-                "rocksdb_compaction_pending": float("nan"),
-                "rocksdb_num_running_compactions": float("nan"),
-                "rocksdb_estimate_pending_compaction_bytes": float("nan"),
-                "rocksdb_total_compaction_time_sec": float("nan"),
-                "rocksdb_compaction_time_delta_sec": float("nan"),
-                "rocksdb_compaction_observed": 0.0,
-            }
+            if record_traces:
+                trace_record = {
+                    "label": label,
+                    "batch_size": int(batch_size),
+                    "num_workers": int(num_workers),
+                    "epoch": int(epoch + 1),
+                    "step_in_epoch": int(step_in_epoch),
+                    "global_step": int(global_step),
+                    "samples_in_batch": int(batch_samples),
+                    "batch_latency_sec": float(batch_latency),
+                    "throughput_samples_per_sec": float(throughput),
+                    "epoch_elapsed_sec": float(t_batch_end - epoch_start),
+                    "run_elapsed_sec": float(t_batch_end - run_start),
+                    "rocksdb_block_cache_hit_rate": float("nan"),
+                    "rocksdb_delta_block_cache_hit": float("nan"),
+                    "rocksdb_delta_block_cache_miss": float("nan"),
+                    "rocksdb_compaction_pending": float("nan"),
+                    "rocksdb_num_running_compactions": float("nan"),
+                    "rocksdb_estimate_pending_compaction_bytes": float("nan"),
+                    "rocksdb_total_compaction_time_sec": float("nan"),
+                    "rocksdb_compaction_time_delta_sec": float("nan"),
+                    "rocksdb_compaction_observed": 0.0,
+                }
 
-            if isinstance(batch, dict) and "trace_metrics" in batch:
-                trace_record.update(build_rocksdb_step_metrics(batch["trace_metrics"], previous_metrics_by_worker))
+                if isinstance(batch, dict) and "trace_metrics" in batch:
+                    trace_record.update(build_rocksdb_step_metrics(batch["trace_metrics"], previous_metrics_by_worker))
 
-            step_traces.append(trace_record)
+                step_traces.append(trace_record)
             global_step += 1
 
             _ = batch["eeg"].shape
@@ -705,26 +707,31 @@ def benchmark_dataloader(dataset: Dataset, batch_size: int, num_workers: int,
         per_epoch_throughput.append(total_samples / epoch_time if epoch_time > 0.0 else float("nan"))
 
     batch_lats = np.asarray(per_batch_latencies, dtype=float)
-    block_cache_rates = [
-        record["rocksdb_block_cache_hit_rate"]
-        for record in step_traces
-        if math.isfinite(record["rocksdb_block_cache_hit_rate"])
-    ]
-    compaction_deltas = [
-        record["rocksdb_compaction_time_delta_sec"]
-        for record in step_traces
-        if math.isfinite(record["rocksdb_compaction_time_delta_sec"])
-    ]
-    pending_compaction_bytes = [
-        record["rocksdb_estimate_pending_compaction_bytes"]
-        for record in step_traces
-        if math.isfinite(record["rocksdb_estimate_pending_compaction_bytes"])
-    ]
-    running_compactions = [
-        record["rocksdb_num_running_compactions"]
-        for record in step_traces
-        if math.isfinite(record["rocksdb_num_running_compactions"])
-    ]
+    block_cache_rates = []
+    compaction_deltas = []
+    pending_compaction_bytes = []
+    running_compactions = []
+    if record_traces:
+        block_cache_rates = [
+            record["rocksdb_block_cache_hit_rate"]
+            for record in step_traces
+            if math.isfinite(record["rocksdb_block_cache_hit_rate"])
+        ]
+        compaction_deltas = [
+            record["rocksdb_compaction_time_delta_sec"]
+            for record in step_traces
+            if math.isfinite(record["rocksdb_compaction_time_delta_sec"])
+        ]
+        pending_compaction_bytes = [
+            record["rocksdb_estimate_pending_compaction_bytes"]
+            for record in step_traces
+            if math.isfinite(record["rocksdb_estimate_pending_compaction_bytes"])
+        ]
+        running_compactions = [
+            record["rocksdb_num_running_compactions"]
+            for record in step_traces
+            if math.isfinite(record["rocksdb_num_running_compactions"])
+        ]
 
     result = {
         "label": label,
@@ -743,7 +750,7 @@ def benchmark_dataloader(dataset: Dataset, batch_size: int, num_workers: int,
         "batch_latency_p99": safe_percentile(batch_lats, 99),
         "rocksdb_block_cache_hit_rate_mean": safe_mean(block_cache_rates),
         "rocksdb_compaction_time_total_sec": float(np.sum(compaction_deltas)) if compaction_deltas else float("nan"),
-        "rocksdb_compaction_observed": bool(any(record["rocksdb_compaction_observed"] > 0.0 for record in step_traces)),
+        "rocksdb_compaction_observed": bool(any(record["rocksdb_compaction_observed"] > 0.0 for record in step_traces)) if record_traces else False,
         "rocksdb_peak_pending_compaction_bytes": max(pending_compaction_bytes) if pending_compaction_bytes else float("nan"),
         "rocksdb_peak_running_compactions": max(running_compactions) if running_compactions else float("nan"),
     }
@@ -767,6 +774,7 @@ def run_experiment(args):
     print(f"  share_preloaded_dataset: {args.share_preloaded_dataset}")
     print(f"  rocksdb_block_cache_mb: {args.rocksdb_block_cache_mb}")
     print(f"  enable_rocksdb_metrics: {args.enable_rocksdb_metrics and not args.disable_rocksdb_metrics}")
+    print(f"  record_traces         : {args.record_traces}")
     print(f"  metrics_sample_stride : {args.metrics_sample_stride}")
     print("=" * 70)
     print()
@@ -823,12 +831,27 @@ def run_experiment(args):
             for name, dataset in variants:
                 if args.warmup:
                     print(f"  [{name}] Warm-up epoch ...")
-                    benchmark_dataloader(dataset, batch_size, num_workers, num_epochs=1, label=f"{name}_warmup")
+                    benchmark_dataloader(
+                        dataset,
+                        batch_size,
+                        num_workers,
+                        num_epochs=1,
+                        label=f"{name}_warmup",
+                        record_traces=args.record_traces,
+                    )
 
                 print(f"  [{name}] Benchmarking {args.epochs} epochs ...")
-                result, traces = benchmark_dataloader(dataset, batch_size, num_workers, num_epochs=args.epochs, label=name)
+                result, traces = benchmark_dataloader(
+                    dataset,
+                    batch_size,
+                    num_workers,
+                    num_epochs=args.epochs,
+                    label=name,
+                    record_traces=args.record_traces,
+                )
                 all_results.append(result)
-                all_traces.extend(traces)
+                if args.record_traces:
+                    all_traces.extend(traces)
 
                 print(
                     f"    Throughput : {result['throughput_mean']:>10.1f} ± {result['throughput_std']:>8.1f} samples/s"
@@ -889,9 +912,10 @@ def run_experiment(args):
             "metrics_sample_stride": args.metrics_sample_stride,
             "collect_rocksdb_metrics": args.enable_rocksdb_metrics and not args.disable_rocksdb_metrics,
             "share_preloaded_dataset": args.share_preloaded_dataset,
+            "record_traces": args.record_traces,
         },
         "summary": all_results,
-        "traces": all_traces,
+        "traces": all_traces if args.record_traces else [],
     }
 
     if args.output:
@@ -924,6 +948,12 @@ def main():
     parser.add_argument("--no_avg", action="store_true", help="Do NOT average over trials")
     parser.add_argument("--skip_exhaustive", action="store_true", default=False, help="Skip the exhaustive variant")
     parser.add_argument("--output", type=str, default=None, help="Path to save the JSON report")
+    parser.add_argument(
+        "--record_traces",
+        action="store_true",
+        default=False,
+        help="Record per-step traces for figure generation; off keeps the legacy summary-only path",
+    )
     parser.add_argument(
         "--share_preloaded_dataset",
         action="store_true",
