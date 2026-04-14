@@ -23,15 +23,16 @@ Usage:
 """
 
 import argparse
+import importlib
 import io
 import json
 import math
 import os
 import re
+import sys
 import time
 
 import numpy as np
-import rocksdb
 import torch
 from torch.utils.data import DataLoader, Dataset, get_worker_info
 
@@ -58,6 +59,43 @@ TRACE_METRIC_FIELDS = (
     "total_compaction_time_sec",
     "compaction_observed",
 )
+
+
+def import_python_rocksdb():
+    """
+    Import the python-rocksdb extension module even when the project contains
+    a local directory named `rocksdb/` that would otherwise shadow it.
+    """
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    candidate_paths = []
+    for path in (os.getcwd(), project_root):
+        if path and os.path.isdir(os.path.join(path, "rocksdb")):
+            candidate_paths.append(path)
+
+    removed_paths = []
+    for path in dict.fromkeys(candidate_paths):
+        while path in sys.path:
+            sys.path.remove(path)
+            removed_paths.append(path)
+
+    try:
+        sys.modules.pop("rocksdb", None)
+        module = importlib.import_module("rocksdb")
+    finally:
+        for path in reversed(removed_paths):
+            sys.path.insert(0, path)
+
+    if not hasattr(module, "DB"):
+        module_file = getattr(module, "__file__", None)
+        raise ImportError(
+            "Failed to import python-rocksdb. "
+            "A local `rocksdb/` directory may be shadowing the installed package. "
+            f"Imported module file: {module_file!r}"
+        )
+    return module
+
+
+rocksdb = import_python_rocksdb()
 
 
 def safe_mean(values) -> float:
