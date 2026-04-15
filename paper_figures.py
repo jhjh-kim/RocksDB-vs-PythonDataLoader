@@ -9,9 +9,17 @@ Supported figures:
   - RocksDB compaction traces
 
 Usage:
-    python paper_figures.py \
+    python3 paper_figures.py \
         --input benchmark_report.json \
         --output_dir figures/paper
+
+Focused step-throughput comparison only:
+    python3 paper_figures.py \
+        --input benchmark_report.json \
+        --output_dir figures/paper \
+        --focus_batch_size 128 \
+        --focus_num_workers 8 \
+        --only_focus_plot
 """
 
 import argparse
@@ -34,6 +42,15 @@ VARIANT_MARKERS = {
     "EEGDataset": "o",
     "Exhaustive": "s",
     "RocksDB": "D",
+}
+FOCUSED_TRACE_VARIANTS = ["EEGDataset", "RocksDB"]
+FOCUSED_TRACE_COLORS = {
+    "EEGDataset": "#2E8B57",
+    "RocksDB": "#E67E22",
+}
+FOCUSED_TRACE_DISPLAY_NAMES = {
+    "EEGDataset": "EEGDataset",
+    "RocksDB": "RocksDBDataset",
 }
 
 
@@ -118,6 +135,13 @@ def group_by_config(records: list[dict]) -> dict[tuple[int, int], list[dict]]:
 def variant_style(variant: str) -> dict:
     return {
         "color": VARIANT_COLORS.get(variant, "#555555"),
+        "marker": VARIANT_MARKERS.get(variant, "o"),
+    }
+
+
+def focused_trace_style(variant: str) -> dict:
+    return {
+        "color": FOCUSED_TRACE_COLORS.get(variant, "#555555"),
         "marker": VARIANT_MARKERS.get(variant, "o"),
     }
 
@@ -245,6 +269,93 @@ def plot_iteration_throughput(traces: list[dict], output_dir: str, formats: list
         save_figure(fig, output_dir, f"fig_iteration_throughput_bs{batch_size}_nw{num_workers}", formats)
 
 
+def plot_focused_iteration_throughput(
+    traces: list[dict],
+    output_dir: str,
+    formats: list[str],
+    batch_size: int,
+    num_workers: int,
+):
+    if not traces:
+        raise ValueError("No trace records were found in the input report.")
+
+    selected = [
+        record for record in traces
+        if int(record["batch_size"]) == int(batch_size)
+        and int(record["num_workers"]) == int(num_workers)
+        and record["label"] in FOCUSED_TRACE_VARIANTS
+    ]
+    if not selected:
+        raise ValueError(
+            f"No trace records matched batch_size={batch_size}, num_workers={num_workers} "
+            f"for variants {FOCUSED_TRACE_VARIANTS}."
+        )
+    missing_variants = [
+        variant for variant in FOCUSED_TRACE_VARIANTS
+        if not any(record["label"] == variant for record in selected)
+    ]
+    if missing_variants:
+        raise ValueError(
+            f"Missing focused trace variants for batch_size={batch_size}, num_workers={num_workers}: "
+            + ", ".join(missing_variants)
+        )
+
+    figure_options = {
+        "figure.dpi": 200,
+        "savefig.dpi": 300,
+        "font.family": "serif",
+        "font.serif": ["STIX Two Text", "STIXGeneral", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.labelsize": 18,
+        "xtick.labelsize": 15,
+        "ytick.labelsize": 15,
+        "legend.fontsize": 15,
+        "legend.frameon": False,
+        "axes.grid": True,
+        "grid.color": "#D7D9E0",
+        "grid.alpha": 0.55,
+        "grid.linestyle": "--",
+        "lines.linewidth": 2.8,
+        "lines.markersize": 7.0,
+    }
+
+    with plt.rc_context(figure_options):
+        fig, ax = plt.subplots(figsize=(8.8, 4.8), constrained_layout=True)
+
+        for variant in FOCUSED_TRACE_VARIANTS:
+            rows = sorted(
+                [record for record in selected if record["label"] == variant],
+                key=lambda record: int(record["global_step"]),
+            )
+            if not rows:
+                continue
+
+            steps = np.arange(1, len(rows) + 1, dtype=int)
+            throughput = np.array([row["throughput_samples_per_sec"] for row in rows], dtype=float)
+            style = focused_trace_style(variant)
+            ax.plot(
+                steps,
+                throughput,
+                color=style["color"],
+                marker=style["marker"],
+                markevery=max(1, len(steps) // 12),
+                label=FOCUSED_TRACE_DISPLAY_NAMES.get(variant, variant),
+            )
+
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Throughput (samples/s)")
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.legend(loc="best")
+        save_figure(
+            fig,
+            output_dir,
+            f"fig_iteration_throughput_focus_bs{batch_size}_nw{num_workers}",
+            formats,
+        )
+
+
 def plot_rocksdb_hit_rate(traces: list[dict], output_dir: str, formats: list[str]):
     rocksdb_traces = [record for record in traces if record["label"] == "RocksDB"]
     if not rocksdb_traces:
@@ -364,33 +475,56 @@ def main():
     parser.add_argument("--input", type=str, required=True, help="JSON report produced by perf_eval.py")
     parser.add_argument("--output_dir", type=str, default="figures/paper", help="Directory for figure files")
     parser.add_argument("--formats", nargs="+", default=["pdf", "png"], help="Output file formats")
+    parser.add_argument("--focus_batch_size", type=int, help="Batch size for the focused per-step throughput comparison")
+    parser.add_argument("--focus_num_workers", type=int, help="num_workers for the focused per-step throughput comparison")
+    parser.add_argument("--only_focus_plot", action="store_true", help="Generate only the focused per-step throughput comparison")
     args = parser.parse_args()
 
     ensure_dir(args.output_dir)
     apply_paper_style()
     summary, traces, metadata = load_report(args.input)
 
-    plot_throughput_overview(summary, args.output_dir, args.formats)
-    plot_latency_overview(summary, args.output_dir, args.formats)
-    plot_iteration_throughput(traces, args.output_dir, args.formats)
-    plot_rocksdb_summary(summary, args.output_dir, args.formats)
-    plot_rocksdb_hit_rate(traces, args.output_dir, args.formats)
-    plot_rocksdb_compaction(traces, args.output_dir, args.formats)
+    if (args.focus_batch_size is None) != (args.focus_num_workers is None):
+        raise ValueError("Both --focus_batch_size and --focus_num_workers must be provided together.")
+    if args.only_focus_plot and args.focus_batch_size is None:
+        raise ValueError("--only_focus_plot requires --focus_batch_size and --focus_num_workers.")
+
+    if not args.only_focus_plot:
+        plot_throughput_overview(summary, args.output_dir, args.formats)
+        plot_latency_overview(summary, args.output_dir, args.formats)
+        plot_iteration_throughput(traces, args.output_dir, args.formats)
+        plot_rocksdb_summary(summary, args.output_dir, args.formats)
+        plot_rocksdb_hit_rate(traces, args.output_dir, args.formats)
+        plot_rocksdb_compaction(traces, args.output_dir, args.formats)
+
+    if args.focus_batch_size is not None and args.focus_num_workers is not None:
+        plot_focused_iteration_throughput(
+            traces,
+            args.output_dir,
+            args.formats,
+            batch_size=args.focus_batch_size,
+            num_workers=args.focus_num_workers,
+        )
 
     manifest = {
         "input": args.input,
         "output_dir": args.output_dir,
         "formats": args.formats,
         "metadata": metadata,
-        "figures_requested": [
+        "figures_requested": [],
+    }
+    if not args.only_focus_plot:
+        manifest["figures_requested"].extend([
             "throughput_overview",
             "latency_overview",
             "iteration_throughput",
             "rocksdb_internal_summary",
             "block_cache_hit_rate",
             "compaction",
-        ],
-    }
+        ])
+    if args.focus_batch_size is not None:
+        manifest["figures_requested"].append("iteration_throughput_focus")
+    manifest["figures_requested"] = [name for name in manifest["figures_requested"] if name is not None]
     with open(os.path.join(args.output_dir, "figure_manifest.json"), "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2)
 
