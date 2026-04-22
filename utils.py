@@ -1,3 +1,6 @@
+'''
+Borrowed from https://github.com/LukunWuXDU/ATS/blob/main/base/utils.py
+'''
 import random
 import numpy as np
 import torch
@@ -94,33 +97,3 @@ def get_device(gpu_ids):
         selected_device=gpu_ids[0]
         # device = torch.device(f'cuda:{selected_device}')
     return selected_device
-
-class ClipLoss(nn.Module):
-    """Deprecated: use utils.loss.ClipLoss instead."""
-    def __init__(self):
-        super().__init__()
-        from utils.loss import ClipLoss as _ClipLoss
-        self._impl = _ClipLoss()
-
-    def forward(self, image_features, text_features, logit_scale):
-        return self._impl(image_features, text_features, logit_scale)
-
-
-class SupConLoss(nn.Module):
-    """Deprecated: use utils.loss.SupConLoss instead."""
-    def __init__(self, temperature=0.07, contrast_mode='all',
-                 base_temperature=0.07):
-        super().__init__()
-        from utils.loss import SupConLoss as _SupConLoss
-        self._impl = _SupConLoss(temperature, contrast_mode, base_temperature)
-
-    @property
-    def temperature(self):
-        return self._impl.temperature
-
-    @temperature.setter
-    def temperature(self, val):
-        self._impl.temperature = val
-
-    def forward(self, features, labels=None, mask=None):
-        return self._impl(features, labels, mask)
